@@ -91,7 +91,7 @@ def notify(bot, update, args, job_queue):
         offset = sec_alarm - mktime(localtime())               # difference between alarm time and current time, secs
     else:
         offset = 86400 + (sec_alarm - mktime(localtime()))     # offsetting to next day
-    job = Job(getweather, 60, repeat=True, context=chat_id)
+    job = Job(getweather, 86400, repeat=True, context=chat_id)
     job_queue.put(job, next_t=offset)
     update.message.reply_text('Notification set on {}'.format(alarm))
 
