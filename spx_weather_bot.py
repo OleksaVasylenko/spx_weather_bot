@@ -3,8 +3,8 @@
 from telegram.ext import (Updater, CommandHandler, Filters,
                           MessageHandler, ConversationHandler, Job)
 from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from time import *
-from utils import *
+from time import mktime, localtime, sleep, asctime, strptime, strftime
+from utils import UserSettings
 import logging
 import os
 import sys
