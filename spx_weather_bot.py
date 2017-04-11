@@ -3,28 +3,39 @@
 from telegram.ext import (Updater, CommandHandler, Filters,
                           MessageHandler, ConversationHandler, Job)
 from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
-from time import mktime, localtime, sleep, asctime, strptime, strftime
+from time import *
 from utils import UserSettings
-import logging
-import os
+from config import bot_token, data_base
 import sys
+import os
+import logging
 import weather
 import shelve
+import dbm
+
+# Changing working directory to the script`s directory
+abspath = os.path.abspath(__file__)
+dname = os.path.dirname(abspath)
+os.chdir(dname)
 
 # Enable logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO)
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.DEBUG)
 
 LOCATION = 0
+NOTIFY_NUMBER = 0
 
 
 def start(bot, update):
     chat_id = update.message.chat_id
-    update.message.reply_text('Hi! I am weather bot.\n'
-                              'Send /setlocation to check the weather in your city.')
-    with shelve.open('usersettings.db') as db:
+    res = ('Hi, {}! I am weather bot.\n'
+           'Send /setlocation to check the weather in your city.'
+           ).format(update.message.from_user.first_name)
+    bot.sendMessage(chat_id=chat_id, text=res)
+    with shelve.open(data_base) as db:
         db[str(chat_id)] = UserSettings(update.message.from_user)
 
 
@@ -45,12 +56,14 @@ def store_location(bot, update):
         user_loc = (user_loc.latitude, user_loc.longitude)
     else:
         user_loc = update.message.text
-    with shelve.open('usersettings.db') as db:
+    with shelve.open(data_base) as db:
         user = db[str(chat_id)]
         user.set_location(user_loc)
         db[str(chat_id)] = user
-    res = ('You`ve just set your location as {}.\n'
-    'Now you can check out weather with /getweather command').format(user_loc)
+    res = (
+        'You`ve just set your location as {}.\n'
+        'Now you can check out weather with /today command'
+        ).format(user_loc)
     reply_markup = ReplyKeyboardRemove()
     bot.sendMessage(chat_id=chat_id, text=res, reply_markup=reply_markup)
     return ConversationHandler.END
@@ -62,22 +75,45 @@ def restart(bot, update):
     os.execl(sys.executable, sys.executable, *sys.argv)
 
 
-def getweather(bot, update):
+def today(bot, update):
     if isinstance(update, Job):  # call came from update or from job_queue?
         job = update
         chat_id = job.context
     else:
         chat_id = update.message.chat_id
-    with shelve.open('usersettings.db') as db:
-        location = db[str(chat_id)].location
+    try:
+        with shelve.open(data_base, 'r') as db:
+            location = db[str(chat_id)].location
+    except (KeyError, dbm.error[0]): # add this to other deals with db
+        return unknown_user(bot, update)
     if location:
-        summary = weather.curr_weather(location) + '\n' + asctime(localtime())
+        summary = weather.today_weather(location) + '\n' + asctime(localtime())
     else:
         summary = 'You haven`t set your location. Please hit /setlocation'
     bot.sendMessage(chat_id=chat_id, text=summary, parse_mode='HTML')
 
 
-def notify(bot, update, args, job_queue):
+def tomorrow(bot, update):
+    if isinstance(update, Job):  # call came from update or from job_queue?
+        job = update
+        chat_id = job.context
+    else:
+        chat_id = update.message.chat_id
+    try:
+        with shelve.open(data_base) as db:
+            location = db[str(chat_id)].location
+    except KeyError:
+        return unknown_user(bot, update)
+    if location:
+        tom_date = gmtime(time() + 86400)
+        summary = (weather.tomorrow_weather(location, tom_date) +
+                   '\n' + asctime(localtime()))
+    else:
+        summary = 'You haven`t set your location. Please hit /setlocation'
+    bot.sendMessage(chat_id=chat_id, text=summary, parse_mode='HTML')
+
+
+def notify(bot, update, args, job_queue, chat_data):
     chat_id = update.message.chat_id
     try:
         alarm = args[0]                                          # extract time command
@@ -88,18 +124,65 @@ def notify(bot, update, args, job_queue):
         update.message.reply_text('Usage:\n /notify HH:MM')
         return
     if (sec_alarm - mktime(localtime())) > 0:
-        offset = sec_alarm - mktime(localtime())               # difference between alarm time and current time, secs
+        offset = sec_alarm - mktime(localtime())                 # difference between alarm time and current time, secs
     else:
-        offset = 86400 + (sec_alarm - mktime(localtime()))     # offsetting to next day
-    job = Job(getweather, 86400, repeat=True, context=chat_id)
+        offset = 86400 + (sec_alarm - mktime(localtime()))       # offsetting to next day
+    job = Job(today, 86400, repeat=True, context=chat_id)
     job_queue.put(job, next_t=offset)
-    update.message.reply_text('Notification set on {}'.format(alarm))
+    chat_data[alarm] = job
+    update.message.reply_text(
+        'Notification set on {}\n'
+        'to unset notifications send /del_notify'.format(alarm))
+
+
+def notify_list(bot, update, chat_data):
+    chat_id = update.message.chat_id
+    if chat_data:
+        res = ('Send a number of notification in list to delete it\n'
+               '(0 to clear all list or /cancel this talk):\n')
+        for num, job_t in enumerate(chat_data, 1):
+            callback = chat_data[job_t].name
+            res += '{num}. {time} — {func}\n'.format(num=num, time=job_t,
+                                                     func=callback)
+    else:
+        bot.sendMessage(chat_id=chat_id,
+                        text='You have no active notifications')
+        return ConversationHandler.END
+    bot.sendMessage(chat_id=chat_id, text=res)
+    return NOTIFY_NUMBER
+
+
+def remove_notify(bot, update, chat_data):
+    answer = update.message.text
+    try:
+        if answer == '0':
+            for job in chat_data:
+                chat_data[job].schedule_removal()
+            chat_data.clear()
+            update.message.reply_text('All notifications cleared')
+            return ConversationHandler.END
+        pointer = int(answer)-1
+        job = list(chat_data)[pointer]
+        chat_data[job].schedule_removal()
+        del chat_data[job]
+        update.message.reply_text(
+            '{} notification deleted'.format(job)
+        )
+    except (TypeError, IndexError, ValueError):
+        update.message.reply_text('Send a number of existing notification.')
+    return ConversationHandler.END
+
+
+def unknown_user(bot, update):
+    update.message.reply_text('I don`t know who you are.\n'
+                              'Please introduce yourself by sending /start')
 
 
 def cancel(bot, update):
     chat_id = update.message.chat_id
     reply_markup = ReplyKeyboardRemove()
-    bot.sendMessage(chat_id=chat_id, text='Okay, maybe next time.', reply_markup=reply_markup)
+    bot.sendMessage(chat_id=chat_id, text='Okay, maybe next time.',
+                    reply_markup=reply_markup)
     return ConversationHandler.END
 
 
@@ -108,10 +191,10 @@ def error(bot, update, error):
 
 
 def main():
-    updater = Updater(token='331318669:AAHiHNvO0J8tX7ys61SKZuOl0g-UtKo3Xe4')
+    updater = Updater(token=bot_token)
     # Get the dispatcher to register handlers
     dp = updater.dispatcher
-    conv_handler = ConversationHandler(
+    loc_conv = ConversationHandler(
         entry_points=[CommandHandler('setlocation', ask_location)],
         states={
             LOCATION:
@@ -119,13 +202,26 @@ def main():
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
+    not_conv = ConversationHandler(
+        entry_points=[CommandHandler('del_notify', notify_list,
+                                     pass_chat_data=True)],
+        states={
+            NOTIFY_NUMBER:
+                [MessageHandler(Filters.text, remove_notify,
+                                pass_chat_data=True)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
     # Adding handlers to dispatcher
     dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(conv_handler)
+    dp.add_handler(loc_conv)
+    dp.add_handler(not_conv)
     dp.add_handler(CommandHandler('r', restart))
-    dp.add_handler(CommandHandler('getweather', getweather))
+    dp.add_handler(CommandHandler('today', today))
+    dp.add_handler(CommandHandler('tomorrow', tomorrow))
     dp.add_handler(CommandHandler('notify', notify,
-                                  pass_args=True, pass_job_queue=True))
+                                  pass_args=True, pass_job_queue=True,
+                                  pass_chat_data=True))
     dp.add_error_handler(error)
 
     updater.start_polling()
