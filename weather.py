@@ -46,7 +46,7 @@ def today_weather(location, url=url):
     # response_then = requests.get(url+'forecast', params=params)
     if response_now.status_code == 200:
         data = response_now.json()
-        summary  = 'Current weather in <b>{}</b> is:\n'.format(data['name'])
+        summary = 'Current weather in <b>{}</b> is:\n'.format(data['name'])
         summary += '{} {}, Temp: <b>{:.1f}</b>° C\n'.format(
             icon2emoji(data['weather'][0]['icon']),
             data['weather'][0]['description'].capitalize(),
